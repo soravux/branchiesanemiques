@@ -90,18 +90,19 @@ static void ev_handler(struct mg_connection *c, int ev, void *p) {
 
 
         /* Send the reply */
-        //snprintf(reply, sizeof(reply), "{ \"uri\": \"%.*s\" }\n", (int) hm->uri.len,
-        //        hm->uri.p);
+        char firstpacket[] = "HTTP/1.1 200 OK\r\n"
+                   "Content-Type: multipart/x-mixed-replace; boundary=--jpgboundary\r\n"
+                   "\r\n";
+        mg_send(c, firstpacket, sizeof(firstpacket));
         int data_len = (cinfo.dest->next_output_byte - out_buffer);
         printf("data len: %i\n", data_len);
         char *buf = calloc(data_len + 256, 1);
         printf("buf: %p\n", buf);
         int headersize = snprintf(buf, 256,
-                "HTTP/1.1 200 OK\r\n"
+                "--jpgboundary"
                 "Content-Type: image/jpeg\r\n"
                 "Content-Length: %d\r\n"
-                "\r\n"
-                "--jpgboundary",
+                "\r\n",
                 data_len);
         printf("headersize: %i\n", headersize);
         memcpy(buf + headersize, out_buffer, data_len);
