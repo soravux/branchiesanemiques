@@ -1,9 +1,9 @@
 SSL_LIB=openssl
 
 SOURCES = tp3serv.c mongoose/mongoose.c
-CFLAGS = -g -W -Wall -Werror -I./mongoose -Wno-unused-function $(CFLAGS_EXTRA) -DMG_ENABLE_THREADS
+CFLAGS = -g -W -Wall -I./mongoose -ljpeg -Wno-unused-function $(CFLAGS_EXTRA) -DMG_ENABLE_THREADS
 
-all: $(PROG)
+all: tp3serv
 
 ifeq ($(OS), Windows_NT)
 # TODO(alashkin): enable SSL in Windows
@@ -28,10 +28,10 @@ ifeq ($(JS), yes)
 	CFLAGS_EXTRA += -DMG_ENABLE_JAVASCRIPT -I $(V7_PATH) $(V7_PATH)/v7.c
 endif
 
-$(PROG): $(SOURCES)
+tp3serv: $(SOURCES)
 	$(CC) $(SOURCES) -o $@ $(CFLAGS)
 
-$(PROG).exe: $(SOURCES)
+tp3serv.exe: $(SOURCES)
 	cl $(SOURCES) /I../.. /MD /Fe$@
 
 clean:
