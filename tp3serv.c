@@ -14,11 +14,12 @@
 
 // Networking
 static const char *s_http_port = "8000";
+static struct mg_mgr *mgr;
 
 #define MAX_CONN 8
-struct mg_connection *tc[MAX_CONN] = {0};
+static struct mg_connection *tc[MAX_CONN] = {0};
 
-void add_conn(struct mg_connection *c) {
+static void add_conn(struct mg_connection *c) {
     for (int i = 0; i < MAX_CONN; ++i) {
         if (tc[i] == NULL) {
             tc[i] = c;
@@ -27,7 +28,7 @@ void add_conn(struct mg_connection *c) {
     }
 }
 
-void remove_conn(struct mg_connection *c) {
+static void remove_conn(struct mg_connection *c) {
     for (int i = 0; i < MAX_CONN; ++i) {
         if (tc[i] == c) {
             tc[i] = NULL;
@@ -37,9 +38,10 @@ void remove_conn(struct mg_connection *c) {
 
 
 // Image (JPEG) compression
-#define OUTBUFFER_SIZE 0x8000
-int im_width = 800;
-int im_height = 600;
+// OUTBUFFER_SIZE minimum: 2k, otherwise some markers won't fit and it's going to wreak havoc
+#define OUTBUFFER_SIZE 0x1000
+static int im_width;
+static int im_height;
 
 
 struct image {
@@ -48,31 +50,39 @@ struct image {
 };
 
 
+struct my_mem_destination_mgr {
+  struct jpeg_destination_mgr pub;
+  unsigned char ** outbuffer;	/* target buffer */
+  unsigned long * outsize;
+  unsigned char * newbuffer;	/* newly allocated buffer */
+  JOCTET * buffer;		/* start of buffer */
+  size_t bufsize;
+};
+
 
 void init_buffer(struct jpeg_compress_struct *cinfo) {
-    struct jpeg_destination_mgr *dmgr = (struct jpeg_destination_mgr*)(cinfo->dest);
-    JOCTET *buffer = (JOCTET*)malloc(OUTBUFFER_SIZE);
-    if (!buffer) {
+    struct my_mem_destination_mgr *dmgr = (struct my_mem_destination_mgr*)(cinfo->dest);
+    dmgr->buffer = (JOCTET*)malloc(OUTBUFFER_SIZE);
+    if (!dmgr->buffer) {
         perror("malloc");
         printf("Out of memory!\n");
         exit(1);
     }
-    cinfo->client_data = malloc(sizeof(unsigned int));
-    *((unsigned int*)cinfo->client_data) = (unsigned int)1;
-    dmgr->next_output_byte = buffer;
-    dmgr->free_in_buffer = OUTBUFFER_SIZE;
+	dmgr->bufsize = OUTBUFFER_SIZE;
+    ((struct jpeg_destination_mgr*)dmgr)->next_output_byte = dmgr->buffer;
+    ((struct jpeg_destination_mgr*)dmgr)->free_in_buffer = OUTBUFFER_SIZE;
 }
 
 boolean empty_buffer(struct jpeg_compress_struct *cinfo) {
-    struct jpeg_destination_mgr *dmgr = (struct jpeg_destination_mgr*)(cinfo->dest);
-    int current_len = *(unsigned int*)cinfo->client_data * OUTBUFFER_SIZE - cinfo->dest->free_in_buffer;
+    struct my_mem_destination_mgr *dmgr = (struct my_mem_destination_mgr*)(cinfo->dest);
+    int current_len = ((struct jpeg_destination_mgr*)dmgr)->next_output_byte - dmgr->buffer;
 
-    *(unsigned int*)cinfo->client_data = *(unsigned int*)cinfo->client_data + (unsigned int)1;
-    dmgr->next_output_byte = realloc(dmgr->next_output_byte - current_len, *(unsigned int*)cinfo->client_data * OUTBUFFER_SIZE);
-    dmgr->next_output_byte += current_len;
-    dmgr->free_in_buffer += OUTBUFFER_SIZE;
+	dmgr->bufsize *= 2;
+    dmgr->buffer = realloc(dmgr->buffer, dmgr->bufsize);
+    ((struct jpeg_destination_mgr*)dmgr)->next_output_byte = dmgr->buffer + current_len;
+    ((struct jpeg_destination_mgr*)dmgr)->free_in_buffer = dmgr->bufsize - current_len;
 
-    return TRUE;
+    return FALSE;
 }
 
 void term_buffer() {
@@ -84,7 +94,8 @@ void term_buffer() {
 struct image encode_jpeg(JSAMPLE *in) {
     struct jpeg_compress_struct cinfo;
     struct jpeg_error_mgr       jerr;
-    struct jpeg_destination_mgr dmgr;
+    //struct jpeg_destination_mgr dmgr;
+	struct my_mem_destination_mgr dmgr;
 	memset(&cinfo, 0, sizeof(cinfo));
 	memset(&jerr, 0, sizeof(jerr));
 	memset(&dmgr, 0, sizeof(dmgr));
@@ -92,11 +103,11 @@ struct image encode_jpeg(JSAMPLE *in) {
     cinfo.err = jpeg_std_error(&jerr);
     jpeg_create_compress(&cinfo);
 
-    dmgr.init_destination    = init_buffer;
-    dmgr.empty_output_buffer = empty_buffer;
-    dmgr.term_destination    = term_buffer;
+    ((struct jpeg_destination_mgr*)&dmgr)->init_destination    = init_buffer;
+    ((struct jpeg_destination_mgr*)&dmgr)->empty_output_buffer = empty_buffer;
+    ((struct jpeg_destination_mgr*)&dmgr)->term_destination    = term_buffer;
 
-    cinfo.dest = &dmgr;
+    cinfo.dest = (struct jpeg_destination_mgr*)&dmgr;
 
     cinfo.image_width      = im_width;
     cinfo.image_height     = im_height;
@@ -105,7 +116,7 @@ struct image encode_jpeg(JSAMPLE *in) {
 
     jpeg_set_defaults(&cinfo);
 	cinfo.dct_method = JDCT_IFAST;
-    jpeg_set_quality (&cinfo, 75, TRUE);
+    jpeg_set_quality(&cinfo, 75, TRUE);
     jpeg_start_compress(&cinfo, TRUE);
 
     JSAMPROW row_pointer;
@@ -119,8 +130,8 @@ struct image encode_jpeg(JSAMPLE *in) {
     jpeg_destroy_compress(&cinfo);
 
 	struct image retval;
-	retval.len = *(unsigned int*)cinfo.client_data * OUTBUFFER_SIZE - cinfo.dest->free_in_buffer;
-	retval.data = cinfo.dest->next_output_byte - retval.len;
+ 	retval.len = ((struct jpeg_destination_mgr*)&dmgr)->next_output_byte - dmgr.buffer;
+	retval.data = dmgr.buffer;
 
     free(cinfo.client_data);
 
@@ -139,6 +150,9 @@ void send_image(struct mg_connection *c, struct image out_image) {
 			out_image.len);
 	memcpy(buf + headersize, out_image.data, out_image.len);
 	mg_send(c, buf, headersize + out_image.len);
+
+	free(out_image.data);
+	free(buf);
 }
 
 
@@ -160,9 +174,9 @@ static void ev_handler(struct mg_connection *c, int ev, void *p) {
 			printf("Requete URI (%p): %s\n", c, uri);
 			if (hm->uri.len == 1 && strncmp(uri, "/", 1) == 0) {
 				// Showing index.html
-				char reply[100] = "<html><body><img src='./stream.mjpg' style='width: 800px'/></body></html>";
+				char reply[100] = "<html><body><img src='./stream.mjpg'/></body></html>";
 				mg_printf(c,
-						  "HTTP/1.0 200 OK\r\n"
+						  "HTTP/1.1 200 OK\r\n"
 						  "Server: PhDStudentSweat/0.8\r\n"
 						  "Content-type: text/html\r\n"
 						  "Content-length: %d\r\n"
@@ -174,7 +188,7 @@ static void ev_handler(struct mg_connection *c, int ev, void *p) {
 			if (strncmp(uri + hm->uri.len - 4, "mjpg", 4) != 0) {
 				printf("URI Inconnu: %s\n", uri);
 				mg_printf(c,
-						  "HTTP/1.0 404 NOT FOUND\r\n"
+						  "HTTP/1.1 404 NOT FOUND\r\n"
 						  "Server: PhDStudentSweat/0.8\r\n"
 						  "Content-type: text/html\r\n"
 						  "Content-length: 0\r\n"
@@ -182,7 +196,7 @@ static void ev_handler(struct mg_connection *c, int ev, void *p) {
 				return;
 			}
             add_conn(c);
-			char firstpacket[] = "HTTP/1.0 200 OK\r\n"
+			char firstpacket[] = "HTTP/1.1 200 OK\r\n"
 					   "Content-type: multipart/x-mixed-replace; boundary=BOUM\r\n"
 					   "\r\n";
 			mg_send(c, firstpacket, sizeof(firstpacket) - 1);
@@ -197,9 +211,11 @@ static void ev_handler(struct mg_connection *c, int ev, void *p) {
 /* //////////////////////////////////////////// //
 // ///////// FONCTIONS PUBLIQUES ////////////// //
 // //////////////////////////////////////////// */
-void envoyer_image(unsigned char *in_buffer) {
+void envoyer_image(unsigned char *in_buffer, int width, int height) {
     // L'image doit etre de format RGB, 1 octet par canal,
     // sous format RGBRGBRGB[...], Row major (gauche-droite, puis haut-bas)
+    im_width = width;
+    im_height = height;
 	struct image out_image = encode_jpeg(in_buffer);
     for (int i = 0; i < MAX_CONN; ++i) {
         if (tc[i] != NULL) {
@@ -209,26 +225,24 @@ void envoyer_image(unsigned char *in_buffer) {
 }
 
 
-struct mg_mgr *init_reseau(void) {
+void init_reseau(void) {
     struct mg_connection *nc;
-	struct mg_mgr *mgr = malloc(sizeof(struct mg_mgr));
+	mgr = malloc(sizeof(struct mg_mgr));
 
     mg_mgr_init(mgr, NULL);
     nc = mg_bind(mgr, s_http_port, ev_handler);
     mg_set_protocol_http_websocket(nc);
-
-    return mgr;
 }
 
 
-void pomper_evenements(struct mg_mgr *mgr) {
+void pomper_evenements() {
     for (int i = 0; i < 10; ++i) {
         mg_mgr_poll(mgr, 10);
     }
 }
 
 
-void liberer_reseau(struct mg_mgr *mgr) {
+void liberer_reseau() {
     mg_mgr_free(mgr);
 }
 /* //////////////////////////////////////////// //
@@ -237,28 +251,32 @@ void liberer_reseau(struct mg_mgr *mgr) {
 
 
 int main(void) {
-    struct mg_mgr *mgr = init_reseau();
+    init_reseau();
 
     /* For each new connection, execute ev_handler in a separate thread */
     //mg_enable_multithreading(nc);
+
+    int my_width = 800;
+    int my_height = 600;
 
     printf("Demarrage du serveur sur le port %s.\n", s_http_port);
 	int target_ts = 0;
 
     for (;;) {
-        pomper_evenements(mgr);
+        pomper_evenements();
 
         // A chaque ~2 secondes
         if (target_ts < (int)time(NULL)) {
 
             // Faire une image a la volee
-            JSAMPLE *in_buffer = calloc(im_width * im_height, 3);
-            for (int i = 0; i < 500; ++i) {
-                in_buffer[rand() % (im_width * im_height * 3)] = rand() % 256;
+            JSAMPLE *in_buffer = calloc(my_width * my_height, 3);
+            for (int i = 0; i < 50000; ++i) {
+                in_buffer[rand() % (my_width * my_height * 3)] = rand() % 256;
             }
-            envoyer_image(in_buffer);
+            envoyer_image(in_buffer, my_width, my_height);
 
-            target_ts = (int)time(NULL) + 1;
+            //target_ts = (int)time(NULL) + 1; // Slower
+            target_ts = 0; // Faster
         }
     }
 
