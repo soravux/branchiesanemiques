@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <signal.h>
 #include "mongoose.h"
 #include <jpeglib.h>
 
@@ -133,7 +134,7 @@ struct image encode_jpeg(JSAMPLE *in) {
  	retval.len = ((struct jpeg_destination_mgr*)&dmgr)->next_output_byte - dmgr.buffer;
 	retval.data = dmgr.buffer;
 
-    free(cinfo.client_data);
+    free(dmgr.buffer);
 
 	return retval;
 }
@@ -250,7 +251,14 @@ void liberer_reseau() {
 // //////////////////////////////////////////// */
 
 
+void interruption() {
+    mg_mgr_free(mgr);
+    free(mgr);
+    exit(0);
+}
+
 int main(void) {
+    signal(SIGINT, interruption);
     init_reseau();
 
     /* For each new connection, execute ev_handler in a separate thread */
@@ -274,13 +282,14 @@ int main(void) {
                 in_buffer[rand() % (my_width * my_height * 3)] = rand() % 256;
             }
             envoyer_image(in_buffer, my_width, my_height);
+            free(in_buffer);
 
             //target_ts = (int)time(NULL) + 1; // Slower
             target_ts = 0; // Faster
         }
     }
 
-    liberer_reseau(mgr);
+    liberer_reseau();
 
     return 0;
 }
