@@ -1,7 +1,9 @@
-SSL_LIB=openssl
+SSL_LIB=
 
 SOURCES = tp3serv.c mongoose/mongoose.c
-CFLAGS = -g -W -Wall -I./mongoose -ljpeg -Wno-unused-function $(CFLAGS_EXTRA) -DMG_ENABLE_THREADS
+#CFLAGS = -g -W -Wall -I./mongoose -ljpeg -Wno-unused-function $(CFLAGS_EXTRA) -DMG_ENABLE_THREADS
+#CFLAGS = -g -W -Wall -I./mongoose -ljpeg -Wno-unused-function $(CFLAGS_EXTRA)
+CFLAGS = -O3 -W -Wall -I./mongoose -ljpeg -Wno-unused-function $(CFLAGS_EXTRA)
 
 all: tp3serv
 
@@ -10,7 +12,7 @@ ifeq ($(OS), Windows_NT)
 CFLAGS += -lws2_32
 CC = gcc
 else
-CFLAGS += -pthread
+#CFLAGS += -pthread
 endif
 
 ifeq ($(SSL_LIB),openssl)
@@ -35,4 +37,4 @@ tp3serv.exe: $(SOURCES)
 	cl $(SOURCES) /I../.. /MD /Fe$@
 
 clean:
-	rm -rf *.gc* *.dSYM *.exe *.obj *.o a.out $(PROG)
+	rm -rf *.gc* *.dSYM *.exe *.obj *.o a.out tp3serv
