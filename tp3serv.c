@@ -4,6 +4,7 @@
 // https://github.com/lvsn/gel3014/blob/master/BaseStation/main.py
 // https://github.com/brad/swftools/blob/master/lib/jpeg.c
 
+#include <time.h>
 #include <unistd.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -13,6 +14,7 @@
 
 // Networking
 static const char *s_http_port = "8000";
+
 #define MAX_CONN 8
 struct mg_connection *tc[MAX_CONN] = {0};
 
@@ -48,25 +50,32 @@ struct image {
 
 
 void init_buffer(struct jpeg_compress_struct *cinfo) {
-  struct jpeg_destination_mgr *dmgr = (struct jpeg_destination_mgr*)(cinfo->dest);
-  JOCTET *buffer = (JOCTET*)malloc(OUTBUFFER_SIZE);
-  if (!buffer) {
-      perror("malloc");
-      printf("Out of memory!\n");
-      exit(1);
-  }
-  dmgr->next_output_byte = buffer;
-  dmgr->free_in_buffer = OUTBUFFER_SIZE;
+    struct jpeg_destination_mgr *dmgr = (struct jpeg_destination_mgr*)(cinfo->dest);
+    JOCTET *buffer = (JOCTET*)malloc(OUTBUFFER_SIZE);
+    if (!buffer) {
+        perror("malloc");
+        printf("Out of memory!\n");
+        exit(1);
+    }
+    cinfo->client_data = malloc(sizeof(unsigned int));
+    *((unsigned int*)cinfo->client_data) = (unsigned int)1;
+    dmgr->next_output_byte = buffer;
+    dmgr->free_in_buffer = OUTBUFFER_SIZE;
 }
 
-boolean empty_buffer() {
-    printf("jpeg mem overflow!\n");
-    exit(1);
+boolean empty_buffer(struct jpeg_compress_struct *cinfo) {
+    struct jpeg_destination_mgr *dmgr = (struct jpeg_destination_mgr*)(cinfo->dest);
+    int current_len = *(unsigned int*)cinfo->client_data * OUTBUFFER_SIZE - cinfo->dest->free_in_buffer;
+
+    *(unsigned int*)cinfo->client_data = *(unsigned int*)cinfo->client_data + (unsigned int)1;
+    dmgr->next_output_byte = realloc(dmgr->next_output_byte - current_len, *(unsigned int*)cinfo->client_data * OUTBUFFER_SIZE);
+    dmgr->next_output_byte += current_len;
+    dmgr->free_in_buffer += OUTBUFFER_SIZE;
 
     return TRUE;
 }
 
-void term_buffer(struct jpeg_compress_struct* cinfo) {
+void term_buffer() {
 	//struct jpeg_destination_mgr *dmgr = (struct jpeg_destination_mgr*)(cinfo->dest);
 	//datalen = OUTBUFFER_SIZE - dmgr->free_in_buffer;
 	//dmgr->free_in_buffer = 0;
@@ -101,14 +110,6 @@ struct image encode_jpeg(JSAMPLE *in) {
 
     JSAMPROW row_pointer;
 
-    /* silly bit of code to get the RGB in the correct order */
-    /*for (int x = 0; x < im_width; x++) {
-        for (int y = 0; y < im_height; y++) {
-            Uint8 *p    = (Uint8 *) image->pixels + y * image->pitch + x * image->format->BytesPerPixel;
-            swap (p[0], p[2]);
-        }
-    }*/
-
     /* main code to write jpeg data */
     while (cinfo.next_scanline < cinfo.image_height) {      
         row_pointer = (JSAMPROW) &in[cinfo.next_scanline * im_width*3];
@@ -118,16 +119,16 @@ struct image encode_jpeg(JSAMPLE *in) {
     jpeg_destroy_compress(&cinfo);
 
 	struct image retval;
-	retval.len = OUTBUFFER_SIZE - cinfo.dest->free_in_buffer;
+	retval.len = *(unsigned int*)cinfo.client_data * OUTBUFFER_SIZE - cinfo.dest->free_in_buffer;
 	retval.data = cinfo.dest->next_output_byte - retval.len;
+
+    free(cinfo.client_data);
 
 	return retval;
 }
 
 
-void send_image(struct mg_connection *c, JSAMPLE *in_buffer) {
-	struct image out_image = encode_jpeg(in_buffer);
-
+void send_image(struct mg_connection *c, struct image out_image) {
 	char *buf = calloc(out_image.len + 256, 1);
 
 	int headersize = snprintf(buf, 256,
@@ -193,35 +194,75 @@ static void ev_handler(struct mg_connection *c, int ev, void *p) {
 }
 
 
-int main(void) {
-    struct mg_connection *nc;
-	struct mg_mgr mgr;
+/* //////////////////////////////////////////// //
+// ///////// FONCTIONS PUBLIQUES ////////////// //
+// //////////////////////////////////////////// */
+void envoyer_image(unsigned char *in_buffer) {
+    // L'image doit etre de format RGB, 1 octet par canal,
+    // sous format RGBRGBRGB[...], Row major (gauche-droite, puis haut-bas)
+	struct image out_image = encode_jpeg(in_buffer);
+    for (int i = 0; i < MAX_CONN; ++i) {
+        if (tc[i] != NULL) {
+            send_image(tc[i], out_image);
+        }
+    }
+}
 
-    mg_mgr_init(&mgr, NULL);
-    nc = mg_bind(&mgr, s_http_port, ev_handler);
+
+struct mg_mgr *init_reseau(void) {
+    struct mg_connection *nc;
+	struct mg_mgr *mgr = malloc(sizeof(struct mg_mgr));
+
+    mg_mgr_init(mgr, NULL);
+    nc = mg_bind(mgr, s_http_port, ev_handler);
     mg_set_protocol_http_websocket(nc);
+
+    return mgr;
+}
+
+
+void pomper_evenements(struct mg_mgr *mgr) {
+    for (int i = 0; i < 10; ++i) {
+        mg_mgr_poll(mgr, 10);
+    }
+}
+
+
+void liberer_reseau(struct mg_mgr *mgr) {
+    mg_mgr_free(mgr);
+}
+/* //////////////////////////////////////////// //
+// ///////// FONCTIONS PUBLIQUES FIN ////////// //
+// //////////////////////////////////////////// */
+
+
+int main(void) {
+    struct mg_mgr *mgr = init_reseau();
 
     /* For each new connection, execute ev_handler in a separate thread */
     //mg_enable_multithreading(nc);
 
-    printf("Starting multi-threaded server on port %s\n", s_http_port);
+    printf("Demarrage du serveur sur le port %s.\n", s_http_port);
 	int target_ts = 0;
+
     for (;;) {
-        int ts = mg_mgr_poll(&mgr, 1000);
+        pomper_evenements(mgr);
 
-        for (int i = 0; i < MAX_CONN; ++i) {
-            if (ts > target_ts && tc[i] != NULL) {
-                JSAMPLE *in_buffer = calloc(im_width * im_height, 3);
-                in_buffer[800*10 + 10 + 0] = 255;
-                in_buffer[800*10 + 10 + 1] = 255;
-                in_buffer[800*10 + 10 + 2] = 255;
+        // A chaque ~2 secondes
+        if (target_ts < (int)time(NULL)) {
 
-                send_image(tc[i], in_buffer);
-                target_ts = ts + 1;
+            // Faire une image a la volee
+            JSAMPLE *in_buffer = calloc(im_width * im_height, 3);
+            for (int i = 0; i < 500; ++i) {
+                in_buffer[rand() % (im_width * im_height * 3)] = rand() % 256;
             }
+            envoyer_image(in_buffer);
+
+            target_ts = (int)time(NULL) + 1;
         }
     }
-    mg_mgr_free(&mgr);
+
+    liberer_reseau(mgr);
 
     return 0;
 }
